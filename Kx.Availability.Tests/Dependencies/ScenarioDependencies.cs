@@ -1,4 +1,5 @@
 using Kx.Availability.Data.Implementation;
+using Kx.Availability.Data.Interfaces;
 using Kx.Availability.Data.Mongo.Data;
 using Kx.Availability.Tests.Data;
 using Kx.Core.Common.Data;
@@ -46,8 +47,12 @@ public class ScenarioDependencies
         services.AddScoped<ITestDataAccessFactory, TestMongoDataAccessFactory>();
         services.AddScoped<IMongoSettings, TestMongoSettings>();
         services.AddScoped<IDataAggregationService, DataAggregationService>();                
-        services.AddSingleton<IKxJsonSettings, KxJsonTestSettings>();                        
-
+        services.AddScoped<IStateErrorService, StateErrorService>();
+        services.AddScoped<IBedroomDataService, BedroomDataService>();
+        services.AddScoped<ILocationService, LocationService>();
+        services.AddScoped<ITenantService, TenantService>();
+        services.AddSingleton<IKxJsonSettings, KxJsonTestSettings>();      
+        
         return services;
     }
 }

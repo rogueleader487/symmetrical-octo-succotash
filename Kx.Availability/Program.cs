@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Kx.Availability.Data.Connection;
 using Kx.Availability.Data.Implementation;
+using Kx.Availability.Data.Interfaces;
 using Kx.Availability.Data.Mongo.Data;
 using Kx.Availability.Data.Mongo.Models;
 using Kx.Availability.Data.Mongo.StoredModels;
@@ -18,7 +19,7 @@ using static System.Net.Mime.MediaTypeNames;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddEndpointsApiExplorer();                            
+builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 builder.Services.Configure<JsonOptions>(options =>
@@ -43,22 +44,27 @@ builder.Host.UseSerilog(
 
 builder.Configuration.AddEnvironmentVariables();
 
-builder.Services.AddScoped<ITenant, Tenant>();
-
 builder.Services.AddSingleton<IKxJsonSettings, KxJsonSettings>();
 builder.Services.AddScoped<IConnectionDefinitionFactory, ConnectionDefinitionFactory>();
-
+builder.Services.AddScoped<ITenant, Tenant>();
 builder.Services.AddScoped<IDataAccessFactory, DataAccessFactory>();
-builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<IMongoSettings, MongoSettings>();
+builder.Services.AddScoped<ILocationService, LocationService>();
 builder.Services.AddScoped<IDataAggregationService, DataAggregationService>();
+builder.Services.AddScoped<IStateErrorService, StateErrorService>();
+builder.Services.AddScoped<IBedroomDataService, BedroomDataService>();
+builder.Services.AddScoped<ITenantService, TenantService>();
 
-builder.Services.AddHttpClient(nameof(LocationsDataStoreModel), client => { 
-});
-builder.Services.AddHttpClient(nameof(BedroomsDataStoreModel), client => {
+builder.Services.AddHttpContextAccessor();
+
+builder.Services.AddHttpClient(nameof(LocationsDataStoreModel), client =>
+{
 });
 
- 
+builder.Services.AddHttpClient(nameof(BedroomsDataStoreModel), client =>
+{
+});
+
 builder.Services.AddMemoryCache();
 
 builder.Services.AddHttpLogging(logging =>
@@ -113,7 +119,7 @@ var listenPort = Environment.GetEnvironmentVariable("ASPNET_PORT");
 app.Use(async (context, next) =>
 {
     context.Request.EnableBuffering();
-    await next.Invoke();    
+    await next.Invoke();
 });
 
 if (string.IsNullOrWhiteSpace(listenPort))

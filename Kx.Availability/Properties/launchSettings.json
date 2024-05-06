@@ -21,6 +21,7 @@
         "BEDROOMS_URL": "http://127.0.0.1:5290/",
         "CONFIG_URL": "http://127.0.0.1:5290/",
         "AWS_REGION": "eu-west-1",
+        //Is this a genuine role? If it's not it's a bit of a misleading name
         "AWS_CORE_API_ROLE": "baconRoll",
         "DEFAULT_PAGE_SIZE": "500",
         "AWS_XRAY_DAEMON_ADDRESS": "http://127.0.0.1:2000"       
@@ -50,6 +51,7 @@
         "CONFIG_URL": "http://127.0.0.1:5290/",
         "AWS_REGION": "eu-west-1",
         "AWS_CORE_API_ROLE": "baconRoll",
+        //Is this a genuine role? If it's not it's a bit of a misleading name
         "DEFAULT_PAGE_SIZE": "500",
         "AWS_XRAY_DAEMON_ADDRESS": "http://127.0.0.1:2000"
       }

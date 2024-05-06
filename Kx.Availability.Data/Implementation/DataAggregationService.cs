@@ -1,113 +1,77 @@
-﻿using System.Data;
-using System.Net;
-using System.Net.Http.Json;
-using Kx.Availability.Data.Exceptions;
+﻿using Kx.Availability.Data.Interfaces;
 using Kx.Availability.Data.Mongo.Models;
-using Kx.Availability.Data.Mongo.StoredModels;
 using Kx.Core.Common.Data;
-using Kx.Core.Common.HelperClasses;
 using Kx.Core.Common.Interfaces;
 using Microsoft.Extensions.Configuration;
 using MongoDB.Driver;
 using Serilog;
+using System.Data;
+using System.Net;
 // ReSharper disable TemplateIsNotCompileTimeConstantProblem
 
 // ReSharper disable PossibleMultipleEnumeration
 
 namespace Kx.Availability.Data.Implementation;
 
+/*
+ * This is a large class that has multiple responsibilities across multiple object types.
+ * Can be refacored out into multiple smaller discrete services. 
+ * These independent elements can then be tested in isolation where appropriate
+ * Data Access needs would need thought to ensure consistency across services (without using a singleton approach with multiple tenancy)
+*/
 public class DataAggregationService : IDataAggregationService
 {
-    private readonly ITenant _tenant;
-    private readonly IHttpClientFactory _httpClientFactory;        
-    private readonly IDataAccessAggregation _aggregateData;    
-    private readonly string? _coreBedroomsUrl;
-    private readonly string? _coreLocationsUrl;
-    private readonly IDataAggregationStoreAccess<LocationsDataStoreModel> _locationsData;
-    private readonly IDataAggregationStoreAccess<BedroomsDataStoreModel> _roomsData;    
-    private readonly int _pageSize;
-    private readonly string? _mongoId;         
-        
+    private readonly ITenant _tenant;   
+    private readonly IDataAccessAggregation _aggregateData;
+    private readonly string? _mongoId;
+    private readonly ITenantService _tenantService;
+    private readonly IBedroomDataService _bedroomDataService;
+    private readonly ILocationService _locationService;
 
-    public DataAggregationService(IDataAccessFactory dataAccessFactory, ITenant tenant, IConfiguration config,
-        IHttpClientFactory httpClientFactory)
+    public DataAggregationService(IDataAccessFactory dataAccessFactory, ITenant tenant, IConfiguration config, ITenantService tenantService, IBedroomDataService bedroomDataService,
+        ILocationService locationService)
     {
-
-        _tenant = tenant;
-        _httpClientFactory = httpClientFactory;                        
+        _tenant = tenant;                
 
         var dbAccessAggregate = dataAccessFactory.GetDataAccess(KxDataType.AvailabilityAggregation);
-        _aggregateData = DataAccessHelper.ParseAggregationDataAccess(dbAccessAggregate);
+       _aggregateData = DataAccessHelper.ParseAggregationDataAccess(dbAccessAggregate);
+                     
+        _mongoId = config.GetSection("MongoID").Value ?? null;
 
-        _locationsData = dataAccessFactory.GetDataStoreAccess<LocationsDataStoreModel>();
-        _roomsData = dataAccessFactory.GetDataStoreAccess<BedroomsDataStoreModel>();
-        
-        
-        _coreBedroomsUrl = config.GetSection("BEDROOMS_URL").Value;
-        _coreLocationsUrl = config.GetSection("LOCATIONS_URL").Value;        
-        _mongoId = config.GetSection("MongoID").Value ?? null;        
-        
-        _pageSize = 1000;
-        if (int.TryParse(config.GetSection("DEFAULT_PAGE_SIZE").Value, out var pageSize))
-        {
-            _pageSize = pageSize;
-        }        
+        _locationService = locationService;  
+        _tenantService = tenantService;
+        _bedroomDataService = bedroomDataService;
     }
-
-    private async Task CreateIndexes()
-    {
-        await CreateLocationsIndexes();
-        await CreateRoomsIndexes();
-    }
-
-    private async Task CreateLocationsIndexes()
-    {
-        var indexBuilder = Builders<LocationsDataStoreModel>.IndexKeys;
-        var indexModel = new CreateIndexModel<LocationsDataStoreModel>(indexBuilder
-            .Ascending(x => x.ExternalId)
-            .Ascending(x => x.Type)
-            .Ascending(x => x.Id)
-            .Ascending(p => p.ParentId));
-        await _locationsData.AddIndex(indexModel);
-    }
-
-    private async Task CreateRoomsIndexes()
-    {
-        var indexBuilder = Builders<BedroomsDataStoreModel>.IndexKeys;
-        var indexModel = new CreateIndexModel<BedroomsDataStoreModel>(indexBuilder.Ascending(x => x.RoomId));
-        await _roomsData.AddIndex(indexModel);
-    }  
 
     public async Task<(HttpStatusCode statusCode, string result)> ReloadOneTenantsDataAsync()
     {
         try
-        {            
-            
+        {
             _aggregateData.StartStateRecord();
-            
+
             Log.Information("Cleaning tmp table");
-            await CleanTenantTempTablesAsync();
-            
-            await CreateIndexes();
-                                    
-            //1. Get Locations 
-            var locationsTask = DoLocationsAsync();
-                                    
-            //2. Get the rooms
-            var roomsTask = DoRoomsAsync();
-                                            
+            await _tenantService.CleanTenantTempTablesAsync();
+
+            await _tenantService.CreateIndexes();
+
+            //1. Get Locations and store them
+            var locationsTask = _locationService.InsertLocationsAsync();
+
+            //2. Get the rooms and store them
+            var roomsTask = _bedroomDataService.InsertRoomsAsync();
+
             await Task.WhenAll(locationsTask, roomsTask);
-            
-            //3. Mash them together
+
+            //3. Combine them together
             //make the main table from all imported tables            
-            await MashTempTablesIntoTheAvailabilityModelAsync();
-            
+            await CombineTempTablesIntoTheAvailabilityModelAsync();
+
             //4. save tenantAvailabilityModel.            
-            await MoveTempTenantToLive();                        
-            await CleanTenantTempTablesAsync();
-                        
+            await MoveTempTenantToLive();
+            await _tenantService.CleanTenantTempTablesAsync();
+
             return (HttpStatusCode.NoContent, string.Empty);
-            
+
         }
         catch (Exception ex)
         {
@@ -115,19 +79,24 @@ public class DataAggregationService : IDataAggregationService
         }
     }
 
-    private async Task MashTempTablesIntoTheAvailabilityModelAsync()
+    public async Task InsertStateAsync(ITenantDataModel item)
+    {
+        await _aggregateData.InsertStateAsync(item);
+    }
+
+    //Renaming, personal preference/opinion but 'Mash' feels incorrect for concise method naming
+    private async Task CombineTempTablesIntoTheAvailabilityModelAsync()
     {
         try
         {
-            
             var aggregatedAvailabilityModel = GetAggregatedDataStoreModel();
 
-            var rooms = _roomsData.QueryFreely();
+            var rooms = _bedroomDataService.GetRooms();
 
-            if (rooms is null || !rooms.Any()) throw new DataException();                                   
-            
+            if (rooms is null || !rooms.Any()) throw new DataException();
+
             foreach (var room in rooms)
-            {                                
+            {
                 var availabilityModel = CreateAvailabilityMongoModel();
                 availabilityModel.ID = _mongoId;
                 if (_mongoId is null)
@@ -137,100 +106,36 @@ public class DataAggregationService : IDataAggregationService
 
                 availabilityModel.TenantId = _tenant.TenantId;
                 availabilityModel.RoomId = room.RoomId;
-                
-                var addLocations = AddLocationModels(room);
+
+                var addLocations = _locationService.AddLocationModels(room);
                 availabilityModel.Locations.AddRange(addLocations);
-                
+
                 aggregatedAvailabilityModel.Availability.Add(availabilityModel);
             }
-          
+
             await _aggregateData.InsertAsync(aggregatedAvailabilityModel);
-          
+
         }
         catch (Exception ex)
         {
-            Log.Error($"Failed to mash data together: {ex}");
+            Log.Error($"Failed to combine data together: {ex}");
             throw;
         }
-    }    
+    }
+
+    private async Task MoveTempTenantToLive()
+    {
+        await _aggregateData.UpdateAsync();
+    }
 
     private AvailabilityMongoModel CreateAvailabilityMongoModel()
     {
         return new AvailabilityMongoModel
         {
             TenantId = _tenant.TenantId,
-            RoomId = string.Empty, 
+            RoomId = string.Empty,
             Locations = new List<LocationModel>()
         };
-    }
-
-   
-    private IEnumerable<LocationModel> AddLocationModels(BedroomsDataStoreModel room)
-    {
-        try
-        {
-            var locationsQuery = _locationsData.QueryFreely();
-
-            /* Add the direct parent area */
-            var tempLocations =
-                locationsQuery?
-                    .Where(l => l.Id == room.LocationID 
-                                && (l.Type.ToLower() != "area" && l.Type.ToLower() != "site"))
-                    .Select(loc => new LocationModel
-                    {
-                        Id = loc.Id,
-                        Name = loc.Name,
-                        ParentId = loc.ParentId,
-                        IsDirectLocation = true
-                    }).ToList();
-
-
-            if (!(tempLocations?.Count > 0))
-                return tempLocations as IEnumerable<LocationModel> ?? new List<LocationModel>();
-
-
-            var currentTopLevelAreaIndex = 0;
-            
-            while (!tempLocations.Exists(x => x.ParentId == null))
-            {
-                var parentLocation = tempLocations[currentTopLevelAreaIndex].ParentId;
-
-                var nextParentLocation =
-                    locationsQuery?
-                        .Where(l => l.Id == parentLocation)
-                        .Select(loc => new LocationModel
-                        {
-                            Id = loc.Id,
-                            Name = loc.Name,
-                            ParentId = loc.ParentId,
-                            IsDirectLocation = true
-                        });
-
-                if (nextParentLocation != null && nextParentLocation.Any())
-                {
-                    tempLocations.AddRange(nextParentLocation.ToList());
-                    currentTopLevelAreaIndex++;
-                }
-                else
-                {
-                    Log.Error(
-                        $"The location has a parent Id where the location does not exist ParentId: {parentLocation}");
-                    break;
-                }
-
-                if (currentTopLevelAreaIndex >= tempLocations.Count) break;
-                
-            }
-
-
-            return tempLocations as IEnumerable<LocationModel> ?? new List<LocationModel>();
-
-        }
-        catch (Exception ex)
-        {
-            Task.FromResult(async () => await LogStateErrorsAsync(LocationType.Locations, ex));
-            throw;
-        }
     }
 
     private AggregatedAvailabilityModel GetAggregatedDataStoreModel()
@@ -240,126 +145,7 @@ public class DataAggregationService : IDataAggregationService
             TenantId = _tenant.TenantId
         };
         return data;
-    }  
-
-    public async Task InsertStateAsync(ITenantDataModel item)
-    {
-        await _aggregateData.InsertStateAsync(item);
     }
 
-    private async Task DoLocationsAsync()
-    {
-        try
-        {
-            //paginate
-            var pageOfLocations = await GetLocationsAsync(pageNo: 1);         
-            await _locationsData.InsertPageAsync<PaginatedStoreModel<LocationsDataStoreModel>>(pageOfLocations);
-
-            if (pageOfLocations.TotalPages > 1)
-            {
-                for (var i = 2; i <= pageOfLocations.TotalPages; i++)
-                {
-                    var page = await GetLocationsAsync(pageNo: i);
-                    await _locationsData.InsertPageAsync<PaginatedStoreModel<LocationsDataStoreModel>>(page);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            await LogStateErrorsAsync(LocationType.Locations, ex);
-            throw;
-        }
-    }
-
-    private async Task DoRoomsAsync()
-    {
-        try
-        {          
-            var pageOfRooms = await GetRoomsFromBedroomsApiAsync();
-            await _roomsData.InsertPageAsync<PaginatedStoreModel<BedroomsDataStoreModel>>(pageOfRooms);
-         
-
-            if (pageOfRooms.TotalPages > 1)
-            {
-         
-                for (var i = 2; i <= pageOfRooms.TotalPages; i++)
-                {
-         
-                    var page = await GetRoomsFromBedroomsApiAsync(i);
-                    await _roomsData.InsertPageAsync<PaginatedStoreModel<BedroomsDataStoreModel>>(page);
-                }         
-            }
-        }
-        catch (Exception ex)
-        {
-            await LogStateErrorsAsync(LocationType.Rooms, ex);
-            throw;
-        }
-    }
-
-
-
-    private async Task<IPaginatedModel<BedroomsDataStoreModel>> GetRoomsFromBedroomsApiAsync(int pageNo = 1)
-    {       
-        var uriBuilder = new UriBuilder(_coreBedroomsUrl!)
-        {
-            Path = $"production/v1/{_tenant.TenantId}/bedrooms/rooms",
-            Query = $"pageSize={_pageSize}&page={pageNo}"
-        };
-        var httpClient = _httpClientFactory.CreateClient(nameof(BedroomsDataStoreModel));
-
-        return await GetDataFromApiAsync<BedroomsDataStoreModel>(uriBuilder, httpClient);
-    }
-
-
-
-    private async Task<IPaginatedModel<LocationsDataStoreModel>> GetLocationsAsync(int pageNo = 1)
-    {
-        var uriBuilder = new UriBuilder(_coreLocationsUrl!)
-        {
-            Path = $"production/v1/{_tenant.TenantId}/locations",
-            Query = $"pageSize={_pageSize}&page={pageNo}"
-        };
-        var httpClient = _httpClientFactory.CreateClient(nameof(LocationsDataStoreModel));
-
-        return await GetDataFromApiAsync<LocationsDataStoreModel>(uriBuilder, httpClient);
-    }
-
-
-
-    public async Task<IPaginatedModel<T>> GetDataFromApiAsync<T>(UriBuilder uriBuilder, HttpClient httpClient)
-    {
-        var response = await httpClient.GetAsync(uriBuilder.ToString());
-        return await response.Content.ReadFromJsonAsync<PaginatedStoreModel<T>>() ??
-               throw new UnprocessableEntityException();
-    }
-
-    private async Task MoveTempTenantToLive()
-    {
-        await _aggregateData.UpdateAsync();
-    }
-
-    private async Task CleanTenantTempTablesAsync()
-    {
-        await _locationsData.DeleteAsync();
-        await _roomsData.DeleteAsync();        
-    }
-
-    private async Task LogStateErrorsAsync(LocationType changeTableType, Exception ex)
-    {
-        await LogStateErrorsAsync(changeTableType.ToString(), ex);
-    }
     
-    private async Task LogStateErrorsAsync(string changeType, Exception ex)
-    {
-        await _aggregateData.UpdateStateAsync(
-            StateEventType.CycleError,
-            true,
-            ex.ToString());
-
-        Log.Logger.Error(
-            "Error inserting {S}{FullMessage}",
-            changeType,
-            ex.ToString());
-    }
 }

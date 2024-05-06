@@ -5,6 +5,11 @@ using MongoDB.Entities;
 
 namespace Kx.Availability.Data.Mongo.StoredModels;
 
+/* 
+ * This model is tied to Mongo, if we were to implement another data storage system
+ * this wouldn't work - potentially refactoring out into a base class that can be shared
+ * across all options, with Mongo specific overrides applied here
+*/
 [BsonIgnoreExtraElements]
 
 public class BedroomsDataStoreModel : IEntity, IDataStoreModel

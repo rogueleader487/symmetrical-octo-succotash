@@ -5,6 +5,10 @@ using Serilog;
 
 namespace Kx.Availability.Data.Mongo.Models;
 
+/*
+ * Doesn't belong here. A utility class like this would belong in a Common project
+ * for reuse across multiple apps ensuring consistent conversions
+*/
 public class CustomDateTimeConverter : JsonConverter<DateTime>
 {
   public override DateTime Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
